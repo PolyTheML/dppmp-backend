@@ -32,19 +32,42 @@ log = logging.getLogger("dppmp")
 def _normalize_db_url(url: str) -> str:
     """
     Normalize any PostgreSQL connection string for asyncpg.
-    asyncpg ONLY accepts 'postgresql://' — not 'postgres://' and not
-    'postgresql+asyncpg://'. Supabase and Render both may provide
-    variants that need fixing.
+
+    Handles:
+    - postgres:// → postgresql://  (Render/Heroku style)
+    - postgresql+asyncpg:// → postgresql://  (SQLAlchemy style)
+    - Supabase IPv6 pooler URLs that asyncpg misparses
+    - Special characters in passwords
     """
     if not url:
         return ""
     url = url.strip()
-    # Render/Heroku use 'postgres://' which asyncpg rejects
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-    # SQLAlchemy-style URIs include '+asyncpg' which asyncpg rejects
-    if url.startswith("postgresql+asyncpg://"):
-        url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    # Fix scheme
+    if url.startswith("postgres://") and not url.startswith("postgresql://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if "+asyncpg" in url:
+        url = url.replace("+asyncpg", "")
+
+    # Supabase pooler URLs sometimes contain brackets or IPv6 hosts
+    # that asyncpg can't parse. Extract components manually if needed.
+    try:
+        from urllib.parse import urlparse, quote, urlunparse
+        parsed = urlparse(url)
+
+        # URL-encode the password if it has special chars like [ ] / etc.
+        if parsed.password:
+            safe_password = quote(parsed.password, safe="")
+            # Reconstruct the netloc with encoded password
+            if parsed.port:
+                netloc = f"{parsed.username}:{safe_password}@{parsed.hostname}:{parsed.port}"
+            else:
+                netloc = f"{parsed.username}:{safe_password}@{parsed.hostname}"
+            url = urlunparse((parsed.scheme, netloc, parsed.path,
+                              parsed.params, parsed.query, parsed.fragment))
+    except Exception:
+        pass  # If parsing fails, try the URL as-is
+
     return url
 
 DATABASE_URL = _normalize_db_url(os.getenv("DATABASE_URL", ""))
