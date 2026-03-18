@@ -29,10 +29,28 @@ logging.basicConfig(
 log = logging.getLogger("dppmp")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+def _normalize_db_url(url: str) -> str:
+    """
+    Normalize any PostgreSQL connection string for asyncpg.
+    asyncpg ONLY accepts 'postgresql://' — not 'postgres://' and not
+    'postgresql+asyncpg://'. Supabase and Render both may provide
+    variants that need fixing.
+    """
+    if not url:
+        return ""
+    url = url.strip()
+    # Render/Heroku use 'postgres://' which asyncpg rejects
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    # SQLAlchemy-style URIs include '+asyncpg' which asyncpg rejects
+    if url.startswith("postgresql+asyncpg://"):
+        url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    return url
+
+DATABASE_URL = _normalize_db_url(os.getenv("DATABASE_URL", ""))
 MODEL_PATH = os.getenv("MODEL_PATH", "models/risk_model.pkl")
 ALLOWED_ORIGINS = os.getenv(
-    "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"
+    "ALLOWED_ORIGINS", "*"
 ).split(",")
 
 # ─── Global state ────────────────────────────────────────────────────────────
@@ -47,23 +65,25 @@ async def lifespan(app: FastAPI):
     """Load model + connect DB on startup, clean up on shutdown."""
     global db_pool, model, model_version
 
-    # 1) Load ML model
+    # 1) Load ML model — catch ANY exception
     try:
         model = joblib.load(MODEL_PATH)
         model_version = getattr(model, "_dppmp_version", "v1.0.0")
         log.info(f"Model loaded: {MODEL_PATH} ({model_version})")
-    except FileNotFoundError:
-        log.warning(f"Model file not found at {MODEL_PATH} — using fallback rule-based model")
+    except Exception as e:
+        log.warning(f"Model load failed: {e} — using fallback rule-based model")
         model = None
 
-    # 2) Connect to database
+    # 2) Connect to database — catch ANY exception
     if DATABASE_URL:
+        log.info(f"Connecting to DB: {DATABASE_URL[:30]}...")
         try:
             db_pool = await asyncpg.create_pool(
                 DATABASE_URL,
-                min_size=2,
-                max_size=10,
+                min_size=1,
+                max_size=5,
                 command_timeout=10,
+                timeout=10,       # connection timeout
             )
             log.info("Database connected")
         except Exception as e:
