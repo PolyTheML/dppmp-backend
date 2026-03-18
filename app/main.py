@@ -64,11 +64,22 @@ def _parse_db_url(url: str) -> dict:
     except Exception:
         return {}
 
-_db_params = _parse_db_url(os.getenv("DATABASE_URL", ""))
+_raw_db_url = os.getenv("DATABASE_URL", "")
+_db_params = _parse_db_url(_raw_db_url)
 MODEL_PATH = os.getenv("MODEL_PATH", "models/risk_model.pkl")
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "*"
 ).split(",")
+
+# Debug: log what we got at import time
+if _raw_db_url:
+    log.info(f"DATABASE_URL found ({len(_raw_db_url)} chars), starts with: {_raw_db_url[:40]}...")
+    if _db_params:
+        log.info(f"Parsed DB params: host={_db_params['host']}, port={_db_params['port']}, db={_db_params['database']}")
+    else:
+        log.warning(f"DATABASE_URL present but could not parse it. Raw value starts with: {_raw_db_url[:60]}...")
+else:
+    log.warning("DATABASE_URL environment variable is empty or not set")
 
 # ─── Global state ────────────────────────────────────────────────────────────
 db_pool: Optional[asyncpg.Pool] = None
