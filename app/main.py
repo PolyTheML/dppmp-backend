@@ -31,38 +31,46 @@ log = logging.getLogger("dppmp")
 # ─── Config ──────────────────────────────────────────────────────────────────
 def _parse_db_url(url: str) -> dict:
     """
-    Parse a PostgreSQL connection string into individual parameters.
-    asyncpg.create_pool() works much more reliably with keyword args
-    (host=, port=, user=, password=, database=) than with a URL string,
-    because URL parsing chokes on special characters in Supabase passwords.
+    Parse a PostgreSQL connection string into individual parameters
+    using regex — avoids all the edge cases of urlparse with dots in
+    usernames and special chars in passwords.
 
-    Accepts: postgres://, postgresql://, postgresql+asyncpg:// formats.
-    Returns: dict with keys host, port, user, password, database — or empty dict if unparseable.
+    Expected format: postgresql://user:password@host:port/database
     """
     if not url:
         return {}
     url = url.strip()
 
-    # Normalize scheme so urlparse handles it
-    for prefix in ["postgresql+asyncpg://", "postgres://"]:
-        if url.startswith(prefix):
-            url = "postgresql://" + url[len(prefix):]
-            break
+    import re
+    # Strip scheme
+    url_body = re.sub(r'^postgresql(\+\w+)?://', '', url)
+    url_body = re.sub(r'^postgres://', '', url_body)
 
-    try:
-        from urllib.parse import urlparse, unquote
-        p = urlparse(url)
-        if not p.hostname:
-            return {}
+    # Pattern: user:password@host:port/database
+    # user can contain dots (e.g. postgres.projectref)
+    # password can contain almost anything
+    m = re.match(r'^([^:]+):(.+)@([^:/@]+):(\d+)/(.+)$', url_body)
+    if m:
         return {
-            "host": p.hostname,
-            "port": p.port or 5432,
-            "user": unquote(p.username or "postgres"),
-            "password": unquote(p.password or ""),
-            "database": (p.path or "/postgres").lstrip("/") or "postgres",
+            "user": m.group(1),
+            "password": m.group(2),
+            "host": m.group(3),
+            "port": int(m.group(4)),
+            "database": m.group(5),
         }
-    except Exception:
-        return {}
+
+    # Fallback: without port
+    m = re.match(r'^([^:]+):(.+)@([^:/@]+)/(.+)$', url_body)
+    if m:
+        return {
+            "user": m.group(1),
+            "password": m.group(2),
+            "host": m.group(3),
+            "port": 5432,
+            "database": m.group(4),
+        }
+
+    return {}
 
 _raw_db_url = os.getenv("DATABASE_URL", "")
 _db_params = _parse_db_url(_raw_db_url)
@@ -75,7 +83,7 @@ ALLOWED_ORIGINS = os.getenv(
 if _raw_db_url:
     log.info(f"DATABASE_URL found ({len(_raw_db_url)} chars), starts with: {_raw_db_url[:40]}...")
     if _db_params:
-        log.info(f"Parsed DB params: host={_db_params['host']}, port={_db_params['port']}, db={_db_params['database']}")
+        log.info(f"Parsed DB params: user={_db_params['user']}, host={_db_params['host']}, port={_db_params['port']}, db={_db_params['database']}")
     else:
         log.warning(f"DATABASE_URL present but could not parse it. Raw value starts with: {_raw_db_url[:60]}...")
 else:
