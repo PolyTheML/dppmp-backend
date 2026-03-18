@@ -29,48 +29,42 @@ logging.basicConfig(
 log = logging.getLogger("dppmp")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-def _normalize_db_url(url: str) -> str:
+def _parse_db_url(url: str) -> dict:
     """
-    Normalize any PostgreSQL connection string for asyncpg.
+    Parse a PostgreSQL connection string into individual parameters.
+    asyncpg.create_pool() works much more reliably with keyword args
+    (host=, port=, user=, password=, database=) than with a URL string,
+    because URL parsing chokes on special characters in Supabase passwords.
 
-    Handles:
-    - postgres:// → postgresql://  (Render/Heroku style)
-    - postgresql+asyncpg:// → postgresql://  (SQLAlchemy style)
-    - Supabase IPv6 pooler URLs that asyncpg misparses
-    - Special characters in passwords
+    Accepts: postgres://, postgresql://, postgresql+asyncpg:// formats.
+    Returns: dict with keys host, port, user, password, database — or empty dict if unparseable.
     """
     if not url:
-        return ""
+        return {}
     url = url.strip()
 
-    # Fix scheme
-    if url.startswith("postgres://") and not url.startswith("postgresql://"):
-        url = "postgresql://" + url[len("postgres://"):]
-    if "+asyncpg" in url:
-        url = url.replace("+asyncpg", "")
+    # Normalize scheme so urlparse handles it
+    for prefix in ["postgresql+asyncpg://", "postgres://"]:
+        if url.startswith(prefix):
+            url = "postgresql://" + url[len(prefix):]
+            break
 
-    # Supabase pooler URLs sometimes contain brackets or IPv6 hosts
-    # that asyncpg can't parse. Extract components manually if needed.
     try:
-        from urllib.parse import urlparse, quote, urlunparse
-        parsed = urlparse(url)
-
-        # URL-encode the password if it has special chars like [ ] / etc.
-        if parsed.password:
-            safe_password = quote(parsed.password, safe="")
-            # Reconstruct the netloc with encoded password
-            if parsed.port:
-                netloc = f"{parsed.username}:{safe_password}@{parsed.hostname}:{parsed.port}"
-            else:
-                netloc = f"{parsed.username}:{safe_password}@{parsed.hostname}"
-            url = urlunparse((parsed.scheme, netloc, parsed.path,
-                              parsed.params, parsed.query, parsed.fragment))
+        from urllib.parse import urlparse, unquote
+        p = urlparse(url)
+        if not p.hostname:
+            return {}
+        return {
+            "host": p.hostname,
+            "port": p.port or 5432,
+            "user": unquote(p.username or "postgres"),
+            "password": unquote(p.password or ""),
+            "database": (p.path or "/postgres").lstrip("/") or "postgres",
+        }
     except Exception:
-        pass  # If parsing fails, try the URL as-is
+        return {}
 
-    return url
-
-DATABASE_URL = _normalize_db_url(os.getenv("DATABASE_URL", ""))
+_db_params = _parse_db_url(os.getenv("DATABASE_URL", ""))
 MODEL_PATH = os.getenv("MODEL_PATH", "models/risk_model.pkl")
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "*"
@@ -98,15 +92,20 @@ async def lifespan(app: FastAPI):
         model = None
 
     # 2) Connect to database — catch ANY exception
-    if DATABASE_URL:
-        log.info(f"Connecting to DB: {DATABASE_URL[:30]}...")
+    if _db_params:
+        log.info(f"Connecting to DB: {_db_params['host']}:{_db_params['port']}/{_db_params['database']}...")
         try:
             db_pool = await asyncpg.create_pool(
-                DATABASE_URL,
+                host=_db_params["host"],
+                port=_db_params["port"],
+                user=_db_params["user"],
+                password=_db_params["password"],
+                database=_db_params["database"],
                 min_size=1,
                 max_size=5,
                 command_timeout=10,
-                timeout=10,       # connection timeout
+                timeout=10,
+                ssl="require",  # Supabase requires SSL
             )
             log.info("Database connected")
         except Exception as e:

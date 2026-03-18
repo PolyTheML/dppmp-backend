@@ -8,7 +8,7 @@ services:
     runtime: python
     region: singapore  # closest to Cambodia
     plan: free         # upgrade to "starter" ($7/mo) to avoid sleep
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python scripts/train_model.py
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
